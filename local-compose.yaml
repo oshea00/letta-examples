@@ -1,0 +1,34 @@
+services:
+  letta_server:
+    image: letta/letta:latest
+    hostname: letta-server
+    ports:
+      - "8283:8283"
+    extra_hosts:
+      # Allows the container to reach your WSL host's services (PostgreSQL, Ollama, etc.)
+      - "host-gateway:host-gateway"
+    environment:
+      # ── Database ──────────────────────────────────────────────────────────
+      # Points at your existing local PostgreSQL. host-gateway resolves to the
+      # WSL host IP so the container can reach services bound to localhost.
+      - LETTA_PG_URI=${LETTA_PG_URI}
+
+      # ── LLM providers (uncomment / add whichever you use) ─────────────────
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+
+      # ── Server behaviour ──────────────────────────────────────────────────
+      - LETTA_DEBUG=${LETTA_DEBUG:-false}
+
+      # Redis is started internally by the container unless you set this.
+      # If you have a local Redis: LETTA_REDIS_HOST=host-gateway
+      # - LETTA_REDIS_HOST=${LETTA_REDIS_HOST:-}
+    env_file:
+      # Optional: put secrets here so they aren't in shell history.
+      # Create this file from .env.example if you want to use it.
+      - path: .env.local
+        required: false
+    restart: unless-stopped
