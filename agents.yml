@@ -1,0 +1,15 @@
+agents:
+  - name: my-agent
+    description: "My AI assistant"
+    llm_config:
+      model: "openai/gpt-4.1"
+      context_window: 128000
+    embedding: "openai/text-embedding-3-small"
+    system_prompt:
+      value: "You are a helpful assistant."
+    memory_blocks:
+      - name: user_info
+        description: "What you know about the user"
+        limit: 2000
+        agent_owned: true
+        value: "No information yet."
