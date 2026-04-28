@@ -17,6 +17,7 @@ docker compose -f local-compose.yaml up
 
 * [Letta API](https://docs.letta.com/api-overview/introduction/)
 * [lettactl](https://docs.letta.com/guides/community/lettactl/)
+* [lettactl GitHub](https://github.com/nouamanecodes/lettactl)
 
 ## Examples
 
