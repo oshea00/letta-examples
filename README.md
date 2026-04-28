@@ -19,6 +19,7 @@ docker compose -f local-compose.yaml up
 * [lettactl](https://docs.letta.com/guides/community/lettactl/)
 * [lettactl GitHub](https://github.com/nouamanecodes/lettactl)
 * [lettactl Docs](https://lettactl.dev/quickstart)
+* [MemGPT Paper](https://arxiv.org/pdf/2310.08560)
 
 ## Examples
 
