@@ -2,13 +2,13 @@
 """Simple chat UI for a local Letta instance. Run with: uv run python chat_ui.py"""
 
 import os
+
 from flask import Flask, jsonify, request, render_template_string
 from letta_client import Letta
 
 app = Flask(__name__)
 LETTA_URL = os.environ.get("LETTA_BASE_URL", "http://localhost:8283")
 client = Letta(base_url=LETTA_URL)
-
 
 # ── Serialisers ───────────────────────────────────────────────────────────────
 
@@ -135,6 +135,83 @@ def delete_agent(agent_id):
     try:
         client.agents.delete(agent_id=agent_id)
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/agents/<agent_id>/conversations")
+def list_conversations(agent_id):
+    try:
+        convs = client.conversations.list(
+            agent_id=agent_id, order="desc", order_by="last_message_at", limit=50
+        )
+        return jsonify([
+            {
+                "id": c.id,
+                "summary": c.summary or "New conversation",
+                "created_at": c.created_at.isoformat() if c.created_at else "",
+                "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None,
+            }
+            for c in convs
+        ])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/agents/<agent_id>/conversations", methods=["POST"])
+def new_conversation(agent_id):
+    data = request.json or {}
+    current_conv_id = data.get("current_conv_id")
+    try:
+        # Stamp the closing conversation with its first user message as summary
+        if current_conv_id:
+            msgs = client.conversations.messages.list(current_conv_id, limit=10, order="asc")
+            for m in msgs:
+                d = message_to_dict(m)
+                if d.get("type") == "user_message" and d.get("content"):
+                    text = d["content"].strip()
+                    summary = text[:80] + ("…" if len(text) > 80 else "")
+                    client.conversations.update(current_conv_id, summary=summary)
+                    break
+        new_conv = client.conversations.create(agent_id=agent_id)
+        return jsonify({
+            "id": new_conv.id,
+            "summary": new_conv.summary or "New conversation",
+            "created_at": new_conv.created_at.isoformat() if new_conv.created_at else "",
+        }), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+_SKIP_MSG_TYPES = {"ping", "stop_reason", "usage_statistics", "error_message"}
+
+
+@app.route("/api/conversations/<conv_id>/messages")
+def get_conversation_messages(conv_id):
+    try:
+        msgs = client.conversations.messages.list(conv_id, limit=200, order="asc")
+        return jsonify([message_to_dict(m) for m in msgs])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/conversations/<conv_id>/messages", methods=["POST"])
+def send_conversation_message(conv_id):
+    data = request.json or {}
+    content = (data.get("content") or "").strip()
+    if not content:
+        return jsonify({"error": "Empty message"}), 400
+    try:
+        stream = client.conversations.messages.create(
+            conv_id,
+            messages=[{"role": "user", "content": content}],
+        )
+        messages = []
+        for event in stream:
+            d = event.model_dump() if hasattr(event, "model_dump") else {}
+            if d.get("message_type") not in _SKIP_MSG_TYPES:
+                messages.append(message_to_dict(event))
+        return jsonify({"messages": messages})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -376,6 +453,21 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #2d3f55; border-radius: 3px; }
+
+/* ── Conversations panel ── */
+#conv-panel { width: 220px; background: #172032; border-right: 1px solid #2d3f55; display: none; flex-direction: column; flex-shrink: 0; }
+#conv-panel-header { padding: 10px; border-bottom: 1px solid #2d3f55; flex-shrink: 0; }
+#new-chat-btn { width: 100%; padding: 7px 10px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; text-align: left; }
+#new-chat-btn:hover { background: #1d4ed8; }
+#new-chat-btn:disabled { background: #273344; color: #475569; cursor: not-allowed; }
+#conv-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+.conv-card { margin: 2px 6px; padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.conv-card:hover { background: #1e293b; }
+.conv-card.active { background: #1e3a5f; border-color: #2563eb; }
+.conv-summary { font-size: 12px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+.conv-card.active .conv-summary { color: #e2e8f0; }
+.conv-date { font-size: 10px; color: #475569; }
+.conv-live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #22c55e; margin-right: 4px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -402,6 +494,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     </div>
     <div id="mcp-list"></div>
   </div>
+</div>
+
+<div id="conv-panel">
+  <div id="conv-panel-header">
+    <button id="new-chat-btn" onclick="newChat()">+ New Chat</button>
+  </div>
+  <div id="conv-list"></div>
 </div>
 
 <div id="main">
@@ -439,7 +538,8 @@ marked.setOptions({
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let agentId = null;
-let busy = false;
+let busy    = false;
+let convId  = null;   // null = agent-direct; "conv-<uuid>" = explicit Letta conversation
 
 // ── Agents ────────────────────────────────────────────────────────────────────
 
@@ -471,22 +571,107 @@ async function loadAgents() {
 
 async function selectAgent(id, name) {
   agentId = id;
+  convId = null;
   document.getElementById('chat-header').textContent = name || id;
+  document.querySelectorAll('.agent-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
+  document.getElementById('conv-panel').style.display = 'flex';
   document.getElementById('msg-input').disabled = false;
   document.getElementById('send-btn').disabled = false;
-  document.querySelectorAll('.agent-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
+
+  await loadConversations(id);
+
+  // If no explicit conversations exist, show agent-direct messages
+  if (!convId) {
+    const msgs = document.getElementById('messages');
+    msgs.innerHTML = '<div style="color:#334155;font-size:13px;text-align:center;padding:20px;">Loading…</div>';
+    try {
+      const data = await api(`/api/agents/${id}/messages`);
+      msgs.innerHTML = '';
+      if (data.error) { msgs.innerHTML = err(data.error); return; }
+      if (!data.length) { msgs.innerHTML = '<div id="empty-state"><p>No messages yet — say hello!</p></div>'; return; }
+      renderMessages(data);
+      scrollBottom();
+    } catch(e) { msgs.innerHTML = err(e.message); }
+  }
+}
+
+async function loadConversations(aid) {
+  const list = document.getElementById('conv-list');
+  list.innerHTML = '<div style="padding:6px 10px;font-size:11px;color:#334155;">Loading…</div>';
+  try {
+    const convs = await api(`/api/agents/${aid}/conversations`);
+    list.innerHTML = '';
+    if (convs.error || !convs.length) {
+      list.innerHTML = '<div style="padding:6px 10px;font-size:11px;color:#334155;font-style:italic;">No past conversations</div>';
+      return;
+    }
+    // Server returns desc by last_message_at — most recent first
+    convs.forEach(c => renderConvCard(c, list));
+    // Auto-select the most recently active conversation
+    await selectConversation(convs[0].id);
+  } catch(e) { list.innerHTML = ''; }
+}
+
+function renderConvCard(conv, container) {
+  const card = document.createElement('div');
+  card.className = 'conv-card';
+  card.dataset.convId = conv.id;
+  const ts = conv.last_message_at || conv.created_at;
+  const d = ts ? new Date(ts) : new Date();
+  const dateStr = d.toLocaleDateString([], {month:'short', day:'numeric'})
+                + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  card.innerHTML = `<div class="conv-summary">${esc(conv.summary || 'New conversation')}</div><div class="conv-date">${esc(dateStr)}</div>`;
+  card.onclick = () => selectConversation(conv.id);
+  container.appendChild(card);
+}
+
+async function selectConversation(id) {
+  if (busy) return;
+  convId = id;
+  document.querySelectorAll('.conv-card').forEach(el =>
+    el.classList.toggle('active', el.dataset.convId === id));
 
   const msgs = document.getElementById('messages');
   msgs.innerHTML = '<div style="color:#334155;font-size:13px;text-align:center;padding:20px;">Loading…</div>';
 
   try {
-    const data = await api(`/api/agents/${id}/messages`);
+    const data = await api(`/api/conversations/${id}/messages`);
     msgs.innerHTML = '';
     if (data.error) { msgs.innerHTML = err(data.error); return; }
-    if (!data.length) { msgs.innerHTML = '<div id="empty-state"><p>No messages yet — say hello!</p></div>'; return; }
+    if (!data.length) {
+      msgs.innerHTML = '<div id="empty-state"><p>New conversation — say hello!</p></div>';
+      return;
+    }
     renderMessages(data);
     scrollBottom();
   } catch(e) { msgs.innerHTML = err(e.message); }
+}
+
+async function newChat() {
+  if (busy || !agentId) return;
+  const btn = document.getElementById('new-chat-btn');
+  btn.disabled = true;
+  try {
+    const newConv = await api(`/api/agents/${agentId}/conversations`, {method:'POST', json:{current_conv_id: convId}});
+    if (newConv.error) { alert('Error: ' + newConv.error); return; }
+    convId = newConv.id;
+    await refreshConvList();
+    document.getElementById('messages').innerHTML = '<div id="empty-state"><p>New conversation — say hello!</p></div>';
+    document.getElementById('msg-input').focus();
+  } catch(e) { alert('Error: ' + e.message); }
+  finally { btn.disabled = false; }
+}
+
+async function refreshConvList() {
+  const list = document.getElementById('conv-list');
+  list.innerHTML = '';
+  try {
+    const convs = await api(`/api/agents/${agentId}/conversations`);
+    if (convs.error || !convs.length) return;
+    convs.forEach(c => renderConvCard(c, list));
+    document.querySelectorAll('.conv-card').forEach(el =>
+      el.classList.toggle('active', el.dataset.convId === convId));
+  } catch(e) { /* ignore */ }
 }
 
 async function deleteAgent(toDeleteId, name) {
@@ -497,10 +682,12 @@ async function deleteAgent(toDeleteId, name) {
     document.querySelector(`.agent-item[data-id="${toDeleteId}"]`)?.remove();
     if (toDeleteId === agentId) {
       agentId = null;
+      convId = null;
       document.getElementById('chat-header').textContent = 'Select an agent';
       document.getElementById('messages').innerHTML = '<div id="empty-state"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><p>Select an agent or create a new one</p></div>';
       document.getElementById('msg-input').disabled = true;
       document.getElementById('send-btn').disabled = true;
+      document.getElementById('conv-panel').style.display = 'none';
     }
     const el = document.getElementById('agents-list');
     if (!el.children.length) el.innerHTML = '<div style="padding:6px 10px;font-size:12px;color:#334155;">No agents yet</div>';
@@ -905,6 +1092,14 @@ async function send() {
 
   appendBubble('user', text);
 
+  // Optimistically update this conversation's summary card on first message
+  if (convId) {
+    const card = document.querySelector(`.conv-card[data-conv-id="${convId}"] .conv-summary`);
+    if (card && card.textContent.trim() === 'New conversation') {
+      card.textContent = text.slice(0, 60) + (text.length > 60 ? '…' : '');
+    }
+  }
+
   const typing = document.createElement('div');
   typing.className = 'typing-wrap';
   typing.innerHTML = '<div class="typing-label">Assistant</div><div class="typing-bubble"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
@@ -912,10 +1107,13 @@ async function send() {
   scrollBottom();
 
   try {
-    const data = await api(`/api/agents/${agentId}/messages`, {method:'POST', json:{content:text}});
+    const url = convId
+      ? `/api/conversations/${convId}/messages`
+      : `/api/agents/${agentId}/messages`;
+    const data = await api(url, {method:'POST', json:{content:text}});
     typing.remove();
     if (data.error) appendBubble('assistant', `⚠ ${data.error}`);
-    else renderMessages(data.messages||[]);
+    else renderMessages(data.messages || []);
   } catch(e) {
     typing.remove(); appendBubble('assistant', `⚠ ${e.message}`);
   }
