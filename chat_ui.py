@@ -77,6 +77,21 @@ def list_agents():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/models")
+def list_models():
+    try:
+        models = client.models.list()
+        llms = [
+            {"handle": m.handle, "display_name": m.display_name, "provider": m.provider_name}
+            for m in models
+            if getattr(m, "model_type", "") == "llm"
+        ]
+        llms.sort(key=lambda m: (m["provider"], m["display_name"]))
+        return jsonify(llms)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/agents", methods=["POST"])
 def create_agent():
     data = request.json or {}
@@ -873,14 +888,7 @@ async function showCreateModal() {
     <label class="field-label">Name</label>
     <input id="ca-name" value="Chat Agent" autocomplete="off">
     <label class="field-label">Model</label>
-    <select id="ca-model">
-      <option value="openai/gpt-4.1">GPT-4.1</option>
-      <option value="openai/gpt-4o">GPT-4o</option>
-      <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
-      <option value="anthropic/claude-sonnet-4-6">Claude Sonnet 4.6</option>
-      <option value="anthropic/claude-opus-4-7">Claude Opus 4.7</option>
-      <option value="anthropic/claude-haiku-4-5">Claude Haiku 4.5</option>
-    </select>
+    <select id="ca-model"><option disabled>Loading models…</option></select>
     <label class="field-label">Persona</label>
     <input id="ca-persona" value="I am a helpful AI assistant." autocomplete="off">
 
@@ -901,6 +909,36 @@ async function showCreateModal() {
     </div>
   `);
   document.getElementById('ca-name').focus();
+
+  // Populate model dropdown from live Letta API
+  try {
+    const modelsData = await api('/api/models');
+    const sel = document.getElementById('ca-model');
+    if (sel && modelsData && !modelsData.error && modelsData.length) {
+      const groups = {};
+      modelsData.forEach(m => {
+        if (!groups[m.provider]) groups[m.provider] = [];
+        groups[m.provider].push(m);
+      });
+      sel.innerHTML = '';
+      Object.keys(groups).sort().forEach(provider => {
+        const og = document.createElement('optgroup');
+        og.label = provider;
+        groups[provider].forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.handle;
+          opt.textContent = m.display_name;
+          if (m.handle === 'anthropic/claude-sonnet-4-6') opt.selected = true;
+          og.appendChild(opt);
+        });
+        sel.appendChild(og);
+      });
+      if (!sel.value) sel.selectedIndex = 0;
+    }
+  } catch(e) {
+    const sel = document.getElementById('ca-model');
+    if (sel) sel.innerHTML = '<option value="openai/gpt-4.1">gpt-4.1 (fallback)</option>';
+  }
 
   // Load MCP servers + their tools in parallel
   try {
